@@ -10,7 +10,7 @@ undocumented endpoints its website calls, with browser-like requests
 endpoints can change without notice: run `python server.py --probe`
 to check what's working.
 """
-import os, sys, json, datetime as dt
+import os, re, sys, json, datetime as dt
 from zoneinfo import ZoneInfo
 from cachetools import TTLCache
 from curl_cffi import requests as creq
@@ -20,6 +20,8 @@ BOSTON = ZoneInfo("America/New_York")
 SITE_SLUGS = [s for s in os.getenv("DOC_SITE_SLUGS", "northeastern,public").split(",") if s]
 LOCATION_MATCH = os.getenv("DOC_LOCATION", "stetson east").lower()
 HOSTS = [h for h in os.getenv("DOC_HOSTS", "https://apiv4.dineoncampus.com,https://api.dineoncampus.com").split(",") if h]
+KNOWN_SITE_ID = os.getenv("DOC_SITE_ID", "5751fd2b90975b60e048929a")
+KNOWN_LOCATION_ID = os.getenv("DOC_LOCATION_ID", "586d05e4ee596f6e6c04b527")
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -89,6 +91,13 @@ def resolve_site():
                         return found
             except Exception:  # noqa: BLE001
                 continue
+    # Discovery is flaky (the sites/locations endpoints rate-limit), so fall
+    # back to the ids we already know for Stetson East rather than failing.
+    if KNOWN_SITE_ID and KNOWN_LOCATION_ID:
+        found = {"host": HOSTS[-1], "site_id": KNOWN_SITE_ID, "location_id": KNOWN_LOCATION_ID,
+                 "location_name": "The Eatery at Stetson East", "resolved": "fallback"}
+        site_cache["site"] = found
+        return found
     raise RuntimeError("Couldn't find Stetson East on Dine On Campus. Run `python server.py --probe` for details.")
 
 
@@ -120,10 +129,25 @@ NUTRIENT_KEYS = {
 
 
 def _num(v):
-    try:
-        return round(float(str(v).replace("<", "").replace("g", "").replace("mg", "").strip()), 1)
-    except Exception:  # noqa: BLE001
+    """Parse a Dine On Campus nutrient value.
+
+    The API returns strings like "7", "0.4", "less than 1 gram", "<1", "0+"
+    and "-" (unknown). Trace amounts become 0.5 so they still count toward
+    daily totals; genuinely unknown values stay None.
+    """
+    if v is None:
         return None
+    s = str(v).strip().lower()
+    if not s or s in {"-", "--", "n/a", "na"}:
+        return None
+    trace = "less than" in s or s.startswith("<")
+    m = re.search(r"\d+(?:\.\d+)?", s)
+    if not m:
+        return None
+    n = float(m.group())
+    if trace:
+        n = n / 2 if n else 0.0
+    return round(n, 1)
 
 
 def _parse_item(it):
